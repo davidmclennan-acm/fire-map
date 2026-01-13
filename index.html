@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Live Fire Map (Auto-Refreshing)</title>
+  <title>Live Fire Map (Polygons & Shapes)</title>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
@@ -22,7 +22,13 @@
 <div class="update-time" id="last-updated">Loading...</div>
 
 <script>
-  // 1. SETUP MAP
+  // --- SETTINGS ---
+  // We now read from the files the Robot saved in the SAME folder
+  // Add a timestamp to bypass browser caching
+  var nswUrl = "./nsw_data.json?t=" + new Date().getTime();
+  var vicUrl = "./vic_data.json?t=" + new Date().getTime();
+
+  // --- MAP SETUP ---
   var map = L.map('map').setView([-36.0, 147.0], 6);
   
   L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
@@ -31,16 +37,15 @@
     maxZoom: 19
   }).addTo(map);
 
-  // Layer Groups to manage updates
   var nswLayer = L.layerGroup().addTo(map);
   var vicLayer = L.layerGroup().addTo(map);
 
-  // 2. STYLING
+  // --- STYLING ---
   var colors = {
-    "Emergency Warning": "#d92b2b",
-    "Watch and Act": "#e67e22",
-    "Advice": "#f1c40f",
-    "Under Control": "#2ecc71"
+    "Emergency Warning": "#d92b2b", // Red
+    "Watch and Act": "#e67e22",     // Orange
+    "Advice": "#f1c40f",            // Yellow
+    "Under Control": "#2ecc71"      // Green
   };
 
   function getAlertLevel(props, source) {
@@ -57,15 +62,29 @@
     return cat;
   }
 
+  // Style for Polygons
   function styleFeature(feature) {
     var level = feature.properties.alertLevel || "Advice";
     return {
       fillColor: colors[level],
+      weight: 2,
+      opacity: 1,
+      color: colors[level], // Outline same color as fill
+      fillOpacity: 0.5
+    };
+  }
+
+  // Style for Dots (Points)
+  function pointStyle(feature, latlng) {
+    var level = feature.properties.alertLevel || "Advice";
+    return L.circleMarker(latlng, {
+      radius: 6,
+      fillColor: colors[level],
+      color: "#fff",
       weight: 1,
       opacity: 1,
-      color: 'white',
-      fillOpacity: 0.6
-    };
+      fillOpacity: 1
+    });
   }
 
   function onEachFeature(feature, layer) {
@@ -73,19 +92,20 @@
     var popupContent = "<h3>" + (p.title || p.location || "Unknown") + "</h3>";
     popupContent += "<b>Level:</b> " + p.alertLevel + "<br>";
     popupContent += "<b>Status:</b> " + (p.status || "Going") + "<br>";
+    popupContent += "<b>Size:</b> " + (p.size || p.sizeFmt || "N/A");
     layer.bindPopup(popupContent);
   }
 
-  // 3. DATA FETCHING FUNCTION
-  function updateMapData() {
+  // --- DATA LOADING ---
+  function loadData() {
     var now = new Date();
     document.getElementById("last-updated").innerHTML = "Updated: " + now.toLocaleTimeString();
 
-    // --- FETCH NSW ---
-    fetch('https://corsproxy.io/?' + encodeURIComponent('https://www.rfs.nsw.gov.au/feeds/majorIncidents.json?t=' + now.getTime()))
+    // 1. NSW
+    fetch(nswUrl)
       .then(r => r.json())
       .then(data => {
-        nswLayer.clearLayers(); // Clear old data
+        nswLayer.clearLayers();
         var cleanData = { type: "FeatureCollection", features: [] };
         
         data.features.forEach(f => {
@@ -96,19 +116,19 @@
           cleanData.features.push(f);
         });
 
+        // Leaflet automatically handles GeometryCollection (Points + Polygons)
         L.geoJSON(cleanData, {
           style: styleFeature,
           onEachFeature: onEachFeature,
-          pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, styleFeature(feature)).setRadius(6); }
+          pointToLayer: pointStyle
         }).addTo(nswLayer);
-      })
-      .catch(e => console.log("NSW Error: " + e));
+      });
 
-    // --- FETCH VIC ---
-    fetch('https://emergency.vic.gov.au/public/osom-geojson.json?t=' + now.getTime())
+    // 2. VIC
+    fetch(vicUrl)
       .then(r => r.json())
       .then(data => {
-        vicLayer.clearLayers(); // Clear old data
+        vicLayer.clearLayers();
         var cleanData = { type: "FeatureCollection", features: [] };
         
         data.features.forEach(f => {
@@ -118,6 +138,8 @@
 
           p.alertLevel = getAlertLevel(p, "VIC");
           var status = p.status || "Going";
+          
+          // Strict Filter: Hide 'Safe' fires unless they are Warnings
           if ((status === "Under Control" || status === "Safe") && p.alertLevel === "Advice") return;
 
           cleanData.features.push(f);
@@ -126,17 +148,18 @@
         L.geoJSON(cleanData, {
           style: styleFeature,
           onEachFeature: onEachFeature,
-          pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, styleFeature(feature)).setRadius(6); }
+          pointToLayer: pointStyle
         }).addTo(vicLayer);
-      })
-      .catch(e => console.log("Vic Error: " + e));
+      });
   }
 
-  // 4. RUN AND REPEAT
-  updateMapData(); // Run immediately on load
-  setInterval(updateMapData, 60000); // Repeat every 60,000ms (60 seconds)
+  // Run immediately
+  loadData();
+  
+  // Refresh map view every 60s (reads the files again)
+  setInterval(loadData, 60000);
 
-  // 5. LEGEND
+  // Legend
   var legend = L.control({position: 'bottomright'});
   legend.onAdd = function (map) {
     var div = L.DomUtil.create('div', 'legend');
