@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Live Fire Map (Auto-Refreshing)</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  
+  <style>
+    body { margin: 0; padding: 0; font-family: sans-serif; }
+    #map { height: 100vh; width: 100%; }
+    .legend { background: white; padding: 10px; border-radius: 5px; box-shadow: 0 0 15px rgba(0,0,0,0.2); font-size: 12px; }
+    .legend i { width: 15px; height: 15px; float: left; margin-right: 8px; opacity: 0.8; }
+    .update-time { position: absolute; top: 10px; right: 10px; background: white; padding: 5px 10px; border-radius: 4px; z-index: 1000; font-size: 12px; box-shadow: 0 0 5px rgba(0,0,0,0.2); }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+<div class="update-time" id="last-updated">Loading...</div>
+
+<script>
+  // 1. SETUP MAP
+  var map = L.map('map').setView([-36.0, 147.0], 6);
+  
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19
+  }).addTo(map);
+
+  // Layer Groups to manage updates
+  var nswLayer = L.layerGroup().addTo(map);
+  var vicLayer = L.layerGroup().addTo(map);
+
+  // 2. STYLING
+  var colors = {
+    "Emergency Warning": "#d92b2b",
+    "Watch and Act": "#e67e22",
+    "Advice": "#f1c40f",
+    "Under Control": "#2ecc71"
+  };
+
+  function getAlertLevel(props, source) {
+    var cat = "Advice";
+    if (source === "VIC") {
+      var c = (props.category1 || "") + (props.category2 || "");
+      if (c.includes("Emergency")) cat = "Emergency Warning";
+      else if (c.includes("Watch and Act")) cat = "Watch and Act";
+    } else {
+      var c = props.category || "";
+      if (c.toLowerCase().includes("emergency")) cat = "Emergency Warning";
+      else if (c.toLowerCase().includes("watch and act")) cat = "Watch and Act";
+    }
+    return cat;
+  }
+
+  function styleFeature(feature) {
+    var level = feature.properties.alertLevel || "Advice";
+    return {
+      fillColor: colors[level],
+      weight: 1,
+      opacity: 1,
+      color: 'white',
+      fillOpacity: 0.6
+    };
+  }
+
+  function onEachFeature(feature, layer) {
+    var p = feature.properties;
+    var popupContent = "<h3>" + (p.title || p.location || "Unknown") + "</h3>";
+    popupContent += "<b>Level:</b> " + p.alertLevel + "<br>";
+    popupContent += "<b>Status:</b> " + (p.status || "Going") + "<br>";
+    layer.bindPopup(popupContent);
+  }
+
+  // 3. DATA FETCHING FUNCTION
+  function updateMapData() {
+    var now = new Date();
+    document.getElementById("last-updated").innerHTML = "Updated: " + now.toLocaleTimeString();
+
+    // --- FETCH NSW ---
+    fetch('https://corsproxy.io/?' + encodeURIComponent('https://www.rfs.nsw.gov.au/feeds/majorIncidents.json?t=' + now.getTime()))
+      .then(r => r.json())
+      .then(data => {
+        nswLayer.clearLayers(); // Clear old data
+        var cleanData = { type: "FeatureCollection", features: [] };
+        
+        data.features.forEach(f => {
+          var p = f.properties;
+          if (p.category == "Not Applicable" || p.category == "Under Control") return;
+          p.alertLevel = getAlertLevel(p, "NSW");
+          p.title = p.title.replace(/^(Bush Fire|Grass Fire|Structure Fire|Burn off) - /, "");
+          cleanData.features.push(f);
+        });
+
+        L.geoJSON(cleanData, {
+          style: styleFeature,
+          onEachFeature: onEachFeature,
+          pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, styleFeature(feature)).setRadius(6); }
+        }).addTo(nswLayer);
+      })
+      .catch(e => console.log("NSW Error: " + e));
+
+    // --- FETCH VIC ---
+    fetch('https://emergency.vic.gov.au/public/osom-geojson.json?t=' + now.getTime())
+      .then(r => r.json())
+      .then(data => {
+        vicLayer.clearLayers(); // Clear old data
+        var cleanData = { type: "FeatureCollection", features: [] };
+        
+        data.features.forEach(f => {
+          var p = f.properties;
+          if ((p.category1 !== "Fire" && p.category2 !== "Fire") || p.status === "False Alarm") return;
+          if (p.category2 === "Total Fire Ban") return;
+
+          p.alertLevel = getAlertLevel(p, "VIC");
+          var status = p.status || "Going";
+          if ((status === "Under Control" || status === "Safe") && p.alertLevel === "Advice") return;
+
+          cleanData.features.push(f);
+        });
+
+        L.geoJSON(cleanData, {
+          style: styleFeature,
+          onEachFeature: onEachFeature,
+          pointToLayer: function (feature, latlng) { return L.circleMarker(latlng, styleFeature(feature)).setRadius(6); }
+        }).addTo(vicLayer);
+      })
+      .catch(e => console.log("Vic Error: " + e));
+  }
+
+  // 4. RUN AND REPEAT
+  updateMapData(); // Run immediately on load
+  setInterval(updateMapData, 60000); // Repeat every 60,000ms (60 seconds)
+
+  // 5. LEGEND
+  var legend = L.control({position: 'bottomright'});
+  legend.onAdd = function (map) {
+    var div = L.DomUtil.create('div', 'legend');
+    div.innerHTML += "<b>Fire Warning</b><br>";
+    div.innerHTML += '<i style="background: #d92b2b"></i> Emergency<br>';
+    div.innerHTML += '<i style="background: #e67e22"></i> Watch & Act<br>';
+    div.innerHTML += '<i style="background: #f1c40f"></i> Advice<br>';
+    return div;
+  };
+  legend.addTo(map);
+
+</script>
+</body>
+</html>
